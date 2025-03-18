@@ -1,0 +1,108 @@
+<!-- BEGIN_TF_DOCS -->
+# Example with Private Endpoint
+
+This example shows how to deploy the module with a private endpoint connection.
+We have also included the Key Vault firewall to restrict access to the Key Vault only via the private endpoint.
+
+```hcl
+terraform {
+  required_version = "~> 1.9"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 3.71"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+# We need the tenant id for the key vault.
+data "azurerm_client_config" "this" {}
+
+# This allows us to randomize the region for the resource group.
+module "regions" {
+  source  = "Azure/avm-utl-regions/azurerm"
+  version = "0.1.0"
+}
+
+# This allows us to randomize the region for the resource group.
+resource "random_integer" "region_index" {
+  max = length(module.regions.regions) - 1
+  min = 0
+}
+
+# This ensures we have unique CAF compliant names for our resources.
+module "naming" {
+  source  = "Azure/naming/azurerm"
+  version = "0.3.0"
+}
+
+# This is required for resource modules
+resource "azurerm_resource_group" "this" {
+  location = module.regions.regions[random_integer.region_index.result].name
+  name     = module.naming.resource_group.name_unique
+}
+
+# A vnet is required for the private endpoint.
+resource "azurerm_virtual_network" "this" {
+  address_space       = ["192.168.0.0/24"]
+  location            = azurerm_resource_group.this.location
+  name                = module.naming.virtual_network.name_unique
+  resource_group_name = azurerm_resource_group.this.name
+}
+
+resource "azurerm_subnet" "this" {
+  address_prefixes     = ["192.168.0.0/24"]
+  name                 = module.naming.subnet.name_unique
+  resource_group_name  = azurerm_resource_group.this.name
+  virtual_network_name = azurerm_virtual_network.this.name
+}
+
+resource "azurerm_private_dns_zone" "this" {
+  name                = "privatelink.vaultcore.azure.net"
+  resource_group_name = azurerm_resource_group.this.name
+}
+
+# This is the module call
+module "keyvault" {
+  source = "../../"
+  # source             = "Azure/avm-res-keyvault-vault/azurerm"
+  name                          = module.naming.key_vault.name_unique
+  enable_telemetry              = var.enable_telemetry
+  location                      = azurerm_resource_group.this.location
+  resource_group_name           = azurerm_resource_group.this.name
+  tenant_id                     = data.azurerm_client_config.this.tenant_id
+  public_network_access_enabled = false
+  private_endpoints = {
+    primary = {
+      private_dns_zone_resource_ids = [azurerm_private_dns_zone.this.id]
+      subnet_resource_id            = azurerm_subnet.this.id
+    }
+  }
+}
+
+# Removed as this causes the idempotent check to fail.
+#
+# check "dns" {
+#   data "azurerm_private_dns_a_record" "assertion" {
+#     name                = module.naming.key_vault.name_unique
+#     zone_name           = "privatelink.vaultcore.azure.net"
+#     resource_group_name = azurerm_resource_group.this.name
+#   }
+#   assert {
+#     condition     = one(data.azurerm_private_dns_a_record.assertion.records) == one(module.keyvault.private_endpoints["primary"].private_service_connection).private_ip_address
+#     error_message = "The private DNS A record for the private endpoint is not correct."
+#   }
+# }
+```
+
+<!-- markdownlint-disable MD033 -->
+
+<!-- END_TF_DOCS -->

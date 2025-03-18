@@ -54,13 +54,13 @@ resource "azurerm_network_security_group" "my_terraform_nsg" {
   resource_group_name = azurerm_resource_group.rg.name
 
   security_rule {
-    name                       = "RDP"
+    name                       = "SSH"
     priority                   = 1000
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "*"
     source_port_range          = "*"
-    destination_port_range     = "3389"
+    destination_port_range     = "22"
     source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
@@ -70,9 +70,6 @@ resource "azurerm_subnet_network_security_group_association" "example" {
   subnet_id                 = azurerm_subnet.my_terraform_subnet.id
   network_security_group_id = azurerm_network_security_group.my_terraform_nsg.id
 }
-
-
-
 
 resource "random_password" "password" {
   length      = 20
@@ -88,28 +85,50 @@ resource "random_pet" "prefix" {
   length = 1
 }
 
+resource "tls_private_key" "ssh" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
 
-resource "azurerm_key_vault_secret" "vm_pwd" {
-  name         = "${var.prefix}-vm-password"
-  value        = random_password.password.result
+#Store the created ssh key in the secrets key vault
+resource "azurerm_key_vault_secret" "ssh_key" {
   key_vault_id = module.keyvault.resource_id
+  name         = "${random_pet.prefix.id}-sshkey"
+  value        = tls_private_key.ssh.private_key_pem
   depends_on = [
     module.keyvault
   ]
 }
 
-module "vm" {
+module "testvm" {
   source                             = "../modules/virtual_machine"
   admin_username                     = "azureuser"
-  admin_password                     = random_password.password.result
   generate_admin_password_or_ssh_key = false
   location                           = azurerm_resource_group.rg.location
   name                               = "${var.prefix}-vm"
-  computer_name                      = "${var.prefix}-vm"
   resource_group_name                = azurerm_resource_group.rg.name
-  os_type                            = "windows"
+  os_type                            = "Linux"
   sku_size                           = "Standard_DS1_v2"
   zone                               = null
+
+  admin_ssh_keys = [
+    {
+      public_key = tls_private_key.ssh.public_key_openssh
+      username   = "azureuser" #the username must match the admin_username currently.
+    }
+  ]
+  network_interfaces = {
+    network_interface_1 = {
+      name = "nic-test"
+      ip_configurations = {
+        ip_configuration_1 = {
+          name                          = "ipconfig1"
+          private_ip_subnet_resource_id = azurerm_subnet.my_terraform_subnet.id
+          public_ip_address_resource_id = azurerm_public_ip.my_terraform_public_ip.id
+        }
+      }
+    }
+  }
 
   os_disk = {
     name                 = "testdisk"
@@ -118,25 +137,13 @@ module "vm" {
   }
 
   source_image_reference = {
-    publisher = "MicrosoftWindowsServer"
-    offer     = "WindowsServer"
-    sku       = "2022-datacenter-g2"
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-focal"
+    sku       = "20_04-lts-gen2"
     version   = "latest"
   }
 
-  network_interfaces = {
-    network_interface_1 = {
-      name = "nic-test"
-      ip_configurations = {
-        ip_configuration_1 = {
-          name                          = "ipconfig"
-          private_ip_subnet_resource_id = azurerm_subnet.my_terraform_subnet.id
-          create_public_ip_address      = false
-          private_ip_address_allocation = "Dynamic"
-          public_ip_address_resource_id = azurerm_public_ip.my_terraform_public_ip.id
-
-        }
-      }
-    }
-  }
+  depends_on = [
+    module.keyvault
+  ]
 }
